@@ -1,109 +1,69 @@
 {
   inputs = {
-    haskell-nix.url = "github:input-output-hk/haskell.nix";
-    stackageSrc = {
-      url = "github:input-output-hk/stackage.nix";
-      flake = false;
+    tokenizers = {
+      url = "github:hasktorch/tokenizers/flakes";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
-    hackageSrc = {
-      url = "github:input-output-hk/hackage.nix";
-      flake = false;
-    };
-    utils.url = "github:numtide/flake-utils";
-    libtorch-nix = {
-      url = "github:hasktorch/libtorch-nix";
-      flake = false;
-    };
+    hasktorch.url = "github:collinarnett/hasktorch/feature/nix-overhaul";
+    flake-parts.url = "github:hercules-ci/flake-parts";
+    haskell-nix.follows = "hasktorch/haskell-nix";
+    nixpkgs.follows = "hasktorch/nixpkgs";
   };
-
-  outputs = inputs@{ self, nixpkgs, haskell-nix, utils, ... }:
-    let
-      name = "hasktorch-skeleton";
-      compiler = "ghc928"; # Not used for `stack.yaml` based projects.
-      cudaSupport = false;
-      cudaMajorVersion = null;
-      project-name = "${name}HaskellPackages";
-
-
-      # This overlay adds our project to pkgs
-      project-overlay = final: prev: {
-        ${project-name} =
-            #assert compiler == supported-compilers;
-            final.haskell-nix.project' {
-              # 'cleanGit' cleans a source directory based on the files known by git
-              src = prev.haskell-nix.haskellLib.cleanGit {
-                inherit name;
+  outputs = inputs @ {
+    self,
+    nixpkgs,
+    tokenizers,
+    haskell-nix,
+    flake-parts,
+    hasktorch,
+  }:
+    flake-parts.lib.mkFlake {inherit inputs;} {
+      systems = ["x86_64-linux"];
+      perSystem = {
+        system,
+        pkgs,
+        lib,
+        ...
+      }: {
+        _module.args.pkgs = import inputs.nixpkgs {
+          inherit system;
+          config.cudaSupport = true;
+          config.allowUnfree = true;
+          overlays = [
+            haskell-nix.overlay
+            tokenizers.overlay
+            hasktorch.overlays.default
+            (final: prev: {
+              hasktorch-skeleton = final.haskell-nix.cabalProject' {
                 src = ./.;
-              };
-
-              compiler-nix-name = compiler;
-              projectFileName = "cabal.project"; # Not used for `stack.yaml` based projects.
-              modules = [
-                # Fixes for libtorch-ffi
-                {
-                  packages.libtorch-ffi = {
-                    configureFlags = with final; [
-                      "--extra-lib-dirs=${torch}/lib"
-                      "--extra-include-dirs=${torch}/include"
-                      "--extra-include-dirs=${torch}/include/torch/csrc/api/include"
-                    ];
-                    flags = {
-                      cuda = cudaSupport;
-                      gcc = !cudaSupport && final.stdenv.hostPlatform.isDarwin;
+                compiler-nix-name = "ghc924";
+                modules = [
+                  # Add non-Haskell dependencies
+                  {
+                    packages.tokenizers = {
+                      configureFlags = ["--extra-lib-dirs=${final.tokenizers-haskell}/lib"];
                     };
-                  };
-                }
-              ];
-
-            };
-
-      };
-    in
-      { overlay = final: prev: {
-          "${name}" = ("${project-name}-overlay" final prev)."${project-name}".flake {};
-        };
-      } // (utils.lib.eachSystem [ "x86_64-linux" ] (system:
-        let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [
-              haskell-nix.overlay
-              (final: prev: {
-                haskell-nix = prev.haskell-nix // {
-                  sources = prev.haskell-nix.sources // {
-                    hackage = inputs.hackageSrc;
-                    stackage = inputs.stackageSrc;
-                  };
-                  modules = [
-                    # Fixes for libtorch-ffi
-                    {
-                      packages.libtorch-ffi = {
-                        configureFlags = with final; [
-                          "--extra-lib-dirs=${torch}/lib"
-                          "--extra-include-dirs=${torch}/include"
-                          "--extra-include-dirs=${torch}/include/torch/csrc/api/include"
-                        ];
-                        flags = {
-                          cuda = cudaSupport;
-                          gcc = !cudaSupport && final.stdenv.hostPlatform.isDarwin;
-                        };
+                    packages.libtorch-ffi = {
+                      configureFlags = [
+                        "--extra-include-dirs=${lib.getDev final.torch}/include/torch/csrc/api/include"
+                      ];
+                      flags = {
+                        cuda = true;
                       };
-                    }
-                  ];
-                };
-              })
-              (import ./nix/overlays/libtorch.nix { inherit inputs cudaSupport cudaMajorVersion; })
-              project-overlay
-            ];
+                    };
+                  }
+                ];
+              };
+            })
+          ];
+        };
+        devShells.default = pkgs.hasktorch-skeleton.shellFor {
+          exactDeps = true;
+          tools = {
+            cabal = {};
+            haskell-language-server = {};
           };
-          flake = pkgs."${project-name}".flake {};
-        in flake // rec {
-
-          packages.example = flake.packages."${name}:exe:example";
-
-          defaultPackage = packages.example;
-
-          devShell = (import ./shell.nix { inherit pkgs; });
-
-        }));
+        };
+      };
+    };
 }
